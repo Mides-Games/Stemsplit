@@ -39,3 +39,12 @@
   drums 7.87, bass 2.94, vocals 0.00, other −0.73 (dB). Vocals at exactly 0.00
   means the vocals mask is still near zero; to be re-checked at the end of the run.
   200 s of audio separated in 97 s on this machine.
+- After **epoch 3**: drums 11.24, bass 6.48, vocals 0.01, other 0.01 (dB).
+
+### Fixed
+- The first run died after epoch 3 with nothing in its log, most likely killed
+  for memory: the trainer held every track in RAM on a server with 11 GB and no
+  swap, beside Overtone's measurement runs (which were cut short at the same
+  time). Tracks are now memory-mapped and read per crop (resident ~0.9 GB), and
+  `--resume` / `--start-epoch` continue from a checkpoint. Training now waits
+  for Overtone's run queue to be empty.

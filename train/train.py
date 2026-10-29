@@ -13,7 +13,7 @@ import random
 
 import numpy as np
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from scipy.io import wavfile
 
 from model import BINS, HOP, UNet, spec
@@ -25,26 +25,26 @@ CROP = (FRAMES - 1) * HOP
 
 
 def load(p):
-    rate, x = wavfile.read(p)
+    # Memory-mapped: only the crop is read, so RAM does not grow with the dataset.
+    # Holding every track in memory got the run killed on the shared server.
+    rate, x = wavfile.read(p, mmap=True)
     assert rate == 44100, f"{p}: {rate} Hz"
-    return torch.from_numpy(np.ascontiguousarray(x.T, dtype=np.float32))  # [2, N]
+    return x  # [N, 2] float32, on disk
 
 
 class Tracks(torch.utils.data.Dataset):
     def __init__(self, root):
         self.dirs = sorted(d for d in pathlib.Path(root).iterdir() if (d / "mixture.wav").exists())
-        self.cache = {}
 
     def __len__(self):
         return len(self.dirs) * 4
 
     def __getitem__(self, i):
         d = self.dirs[i % len(self.dirs)]
-        if d not in self.cache:
-            self.cache[d] = torch.stack([load(d / f"{s}.wav") for s in STEMS])  # [4, 2, N]
-        stems = self.cache[d]
-        o = random.randint(0, stems.shape[-1] - CROP - 1)
-        stems = stems[..., o:o + CROP] * random.uniform(0.5, 1.2)
+        waves = [load(d / f"{s}.wav") for s in STEMS]
+        o = random.randint(0, waves[0].shape[0] - CROP - 1)
+        stems = torch.stack([torch.from_numpy(np.array(w[o:o + CROP].T, dtype=np.float32)) for w in waves])
+        stems = stems * random.uniform(0.5, 1.2)  # [4, 2, CROP]
         return stems.sum(0), stems  # mixture [2, N], stems [4, 2, N]
 
 
@@ -55,6 +55,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--resume", help="safetensors to start from (a checkpoint of this script)")
+    ap.add_argument("--start-epoch", type=int, default=0, help="epochs already done, for the log")
     ap.add_argument("--threads", type=int, default=0, help="torch CPU threads, 0 = torch default")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -62,11 +64,14 @@ def main():
         torch.set_num_threads(a.threads)
     torch.manual_seed(0)
     random.seed(0)
-    net = UNet().to(dev)
+    net = UNet()
+    if a.resume:
+        net.load_state_dict(load_file(a.resume))
+    net = net.to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     dl = torch.utils.data.DataLoader(Tracks(a.data), batch_size=a.batch, shuffle=True, num_workers=0)
     w = WEIGHTS.to(dev).view(1, 4, 1, 1, 1)
-    for epoch in range(a.epochs):
+    for epoch in range(a.start_epoch, a.epochs):
         total = 0.0
         for mix, stems in dl:
             mix, stems = mix.to(dev), stems.to(dev)
