@@ -31,5 +31,11 @@
   (not BSS-Eval), median dB, mixture-as-estimate in brackets:
   drums 2.72 [0.53], bass −1.14 [−5.08], vocals 0.00 (silent stem) [−8.34],
   other −1.30 [−8.99]. 200 s of audio in 14 s on this machine.
-- U-Net: **not measured** — not trained yet (no torch locally; training goes to
-  the owner's server).
+- PyTorch parity (on the server, `train/parity.py` + `--ignored parity`): Rust
+  forward pass equals PyTorch's within 1e-4.
+- U-Net, training on the owner's server (6 CPU cores, no GPU, shared with other
+  services, `nice 19`, 4 threads): 200 synthetic tracks × 10 s, seeds 0–199,
+  about 10.5 min per epoch. After **epoch 1 of 30**, same 20 test tracks:
+  drums 7.87, bass 2.94, vocals 0.00, other −0.73 (dB). Vocals at exactly 0.00
+  means the vocals mask is still near zero; to be re-checked at the end of the run.
+  200 s of audio separated in 97 s on this machine.

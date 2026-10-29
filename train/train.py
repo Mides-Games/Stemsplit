@@ -55,8 +55,11 @@ def main():
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--threads", type=int, default=0, help="torch CPU threads, 0 = torch default")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if a.threads:
+        torch.set_num_threads(a.threads)
     torch.manual_seed(0)
     random.seed(0)
     net = UNet().to(dev)
@@ -77,9 +80,15 @@ def main():
             opt.step()
             total += loss.item()
         print(f"epoch {epoch + 1}: loss {total / len(dl):.5f}", flush=True)
-    pathlib.Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    save_file({k: v.detach().cpu().contiguous() for k, v in net.state_dict().items()}, a.out)
+        save(net, a.out)  # every epoch, so a stopped run keeps its progress
     print("wrote", a.out)
+
+
+def save(net, out):
+    pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
+    tmp = out + ".tmp"
+    save_file({k: v.detach().cpu().contiguous() for k, v in net.state_dict().items()}, tmp)
+    pathlib.Path(tmp).replace(out)
 
 
 if __name__ == "__main__":
