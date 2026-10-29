@@ -1,0 +1,14 @@
+[package]
+name = "stemsplit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "stemsplit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+stemsplit = { path = "../stemsplit" }

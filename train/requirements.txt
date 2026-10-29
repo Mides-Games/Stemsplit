@@ -1,0 +1,5 @@
+# Training only; the separator itself is Rust. All BSD/Apache.
+torch>=2.4
+numpy>=2.0
+scipy>=1.13
+safetensors>=0.4
