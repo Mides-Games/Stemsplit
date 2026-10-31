@@ -40,6 +40,12 @@
   means the vocals mask is still near zero; to be re-checked at the end of the run.
   200 s of audio separated in 97 s on this machine.
 - After **epoch 3**: drums 11.24, bass 6.48, vocals 0.01, other 0.01 (dB).
+- After **epoch 10**: drums 13.30, bass 6.89, vocals 0.01, other 1.21 (dB).
+- After **epoch 30** (2026-10-30, loss 0.0695; epochs 21-30 resumed from the
+  epoch-20 weights, Adam restarted): drums **13.53**, bass **8.64**, vocals
+  **12.27**, other **10.57** (dB), same 20 test tracks. The vocals mask, flat
+  through epoch 10, was learned between epochs 10 and 30. Synthetic mixes only:
+  real songs will score lower; Overtone's bands stage is the real-audio check.
 
 ### Fixed
 - The first run died after epoch 3 with nothing in its log, most likely killed
