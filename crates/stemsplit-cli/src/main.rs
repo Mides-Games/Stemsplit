@@ -84,19 +84,24 @@ fn main() -> Result<()> {
             model,
             stems,
         } => {
-            let sep = separator(model.as_deref())?;
-            let mix = decode(&input)?;
-            let t = Instant::now();
-            let s = sep.separate(&mix)?;
-            std::fs::create_dir_all(&out)?;
-            let wanted: Vec<String> = stems
+            let names: Vec<String> = stems
                 .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
                 .unwrap_or_else(|| STEM_NAMES.iter().map(|s| s.to_string()).collect());
-            for w in &wanted {
+            let mut wanted = Vec::new();
+            for w in &names {
                 let Some(i) = STEM_NAMES.iter().position(|n| n == w) else {
                     bail!("unknown stem {w}")
                 };
-                write_wav(&out.join(format!("{w}.wav")), s.get(i))?;
+                wanted.push(i);
+            }
+            let sep = separator(model.as_deref())?;
+            let mix = decode(&input)?;
+            let t = Instant::now();
+            // Only the stems asked for are computed: `--stems drums` skips three masks and iSTFTs.
+            let s = sep.separate_stems(&mix, &wanted)?;
+            std::fs::create_dir_all(&out)?;
+            for (w, a) in names.iter().zip(&s) {
+                write_wav(&out.join(format!("{w}.wav")), a)?;
             }
             eprintln!(
                 "{} : {:.1} s of audio in {:.1} s ({})",

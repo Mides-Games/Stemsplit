@@ -10,18 +10,20 @@
 //! For Overtone (roadmap step 28.3) the entry point is [`drums_mono`].
 
 pub mod audio;
+pub mod conv;
 pub mod model;
 pub mod stft;
 pub mod synth;
 
 use std::path::Path;
 
-use anyhow::Result;
-use candle_core::Tensor;
+use anyhow::{ensure, Result};
+use rayon::prelude::*;
 
 pub use audio::{decode, write_wav, Audio, SAMPLE_RATE};
-use model::{UNet, MODEL_BINS, STEMS};
-use stft::{istft, stft, Spec, BINS};
+use conv::Act;
+use model::{mask_at, UNet, MODEL_BINS, STEMS};
+use stft::{istft_masked, stft, Spec, BINS};
 
 pub const STEM_NAMES: [&str; STEMS] = ["drums", "bass", "vocals", "other"];
 
@@ -59,45 +61,52 @@ impl Separator {
 
     /// Separate any-rate stereo audio. Stems come back at the input's rate and length.
     pub fn separate(&self, mix: &Audio) -> Result<Stems> {
-        let rate = mix.sample_rate;
-        let work = mix.resampled(SAMPLE_RATE);
-        let specs = [stft(&work.left), stft(&work.right)];
-        let masks = match self {
-            Separator::Hpss => hpss_masks(&specs),
-            Separator::Network(net) => network_masks(net, &specs)?,
-        };
-        let mut out = Vec::with_capacity(STEMS);
-        for stem in masks.iter() {
-            let ch: Vec<Vec<f32>> = (0..2)
-                .map(|c| {
-                    let s = &specs[c];
-                    let data = s.data.iter().zip(&stem[c]).map(|(z, m)| z * *m).collect();
-                    istft(
-                        &Spec {
-                            frames: s.frames,
-                            data,
-                        },
-                        work.len(),
-                    )
-                })
-                .collect();
-            let a = Audio {
-                sample_rate: SAMPLE_RATE,
-                left: ch[0].clone(),
-                right: ch[1].clone(),
-            };
-            let mut a = a.resampled(rate);
-            a.left.resize(mix.len(), 0.0);
-            a.right.resize(mix.len(), 0.0);
-            out.push(a);
-        }
-        let mut it = out.into_iter();
+        let all: Vec<usize> = (0..STEMS).collect();
+        let mut it = self.separate_stems(mix, &all)?.into_iter();
         Ok(Stems {
             drums: it.next().unwrap(),
             bass: it.next().unwrap(),
             vocals: it.next().unwrap(),
             other: it.next().unwrap(),
         })
+    }
+
+    /// Only the stems in `wanted` (indices into [`STEM_NAMES`]), in that order.
+    /// Each is what [`Separator::separate`] returns for it; the other stems'
+    /// masks and iSTFTs are never computed.
+    pub fn separate_stems(&self, mix: &Audio, wanted: &[usize]) -> Result<Vec<Audio>> {
+        ensure!(wanted.iter().all(|&s| s < STEMS), "stem index out of range");
+        let rate = mix.sample_rate;
+        let work = mix.resampled(SAMPLE_RATE);
+        let len = work.len();
+        let (left, right) = rayon::join(|| stft(&work.left), || stft(&work.right));
+        drop(work);
+        let specs = [left, right];
+        let masks = match self {
+            Separator::Hpss => {
+                let all = hpss_masks(&specs);
+                wanted.iter().map(|&s| all[s].clone()).collect()
+            }
+            Separator::Network(net) => network_masks(net, &specs, wanted)?,
+        };
+        Ok(masks
+            .iter()
+            .map(|m| {
+                let (left, right) = rayon::join(
+                    || istft_masked(&specs[0], Some(&m[0]), len),
+                    || istft_masked(&specs[1], Some(&m[1]), len),
+                );
+                let mut a = Audio {
+                    sample_rate: SAMPLE_RATE,
+                    left,
+                    right,
+                }
+                .resampled(rate);
+                a.left.resize(mix.len(), 0.0);
+                a.right.resize(mix.len(), 0.0);
+                a
+            })
+            .collect())
     }
 }
 
@@ -109,10 +118,10 @@ pub fn drums_mono(
     sample_rate: u32,
 ) -> Result<Vec<f32>> {
     let mix = Audio::from_interleaved(samples, channels, sample_rate);
-    Ok(separator.separate(&mix)?.drums.mono())
+    Ok(separator.separate_stems(&mix, &[0])?[0].mono())
 }
 
-/// `[stem][channel][bin * frames + frame]`
+/// `[stem][channel][bin * frames + frame]`, for the stems a caller asked for
 type Masks = Vec<[Vec<f32>; 2]>;
 
 fn median(buf: &mut [f32]) -> f32 {
@@ -166,42 +175,51 @@ fn hpss_masks(specs: &[Spec; 2]) -> Masks {
     masks
 }
 
-/// Run the U-Net over chunks of frames with context on both sides.
-fn network_masks(net: &UNet, specs: &[Spec; 2]) -> Result<Masks> {
+/// Run the U-Net over chunks of frames with context on both sides; keep the `wanted` stems' masks.
+fn network_masks(net: &UNet, specs: &[Spec; 2], wanted: &[usize]) -> Result<Masks> {
     const CORE: usize = 256;
     const CTX: usize = 16;
     const WIN: usize = CORE + 2 * CTX;
     let t_n = specs[0].frames;
-    let mut masks: Masks = (0..STEMS)
+    let mut masks: Masks = wanted
+        .iter()
         .map(|_| [vec![0.0; BINS * t_n], vec![0.0; BINS * t_n]])
         .collect();
+    let plane = MODEL_BINS * WIN;
     let mut start = 0;
     while start < t_n {
-        let mut input = vec![0.0f32; 2 * MODEL_BINS * WIN];
-        for c in 0..2 {
-            for f in 0..MODEL_BINS {
-                for w in 0..WIN {
+        let mut input = vec![0.0f32; 2 * plane];
+        input
+            .par_chunks_mut(WIN)
+            .enumerate()
+            .for_each(|(row, dst)| {
+                let (c, f) = (row / MODEL_BINS, row % MODEL_BINS);
+                for (w, v) in dst.iter_mut().enumerate() {
                     let t = start as isize + w as isize - CTX as isize;
                     if t >= 0 && (t as usize) < t_n {
-                        input[(c * MODEL_BINS + f) * WIN + w] =
-                            specs[c].at(f, t as usize).norm().ln_1p();
+                        *v = specs[c].at(f, t as usize).norm().ln_1p();
                     }
                 }
-            }
-        }
-        let x = Tensor::from_vec(input, (1, 2, MODEL_BINS, WIN), &net.device)?;
-        let y: Vec<f32> = net.forward(&x)?.flatten_all()?.to_vec1()?;
-        for s in 0..STEMS {
+            });
+        let x = Act {
+            c: 2,
+            h: MODEL_BINS,
+            w: WIN,
+            data: input,
+        };
+        let y = net.logits(&x)?;
+        let end = (start + CORE).min(t_n);
+        for (k, &s) in wanted.iter().enumerate() {
             for c in 0..2 {
-                for f in 0..BINS {
-                    let fm = f.min(MODEL_BINS - 1); // Nyquist bin borrows the bin below
-                    for w in CTX..CTX + CORE {
-                        let t = start + w - CTX;
-                        if t < t_n {
-                            masks[s][c][f * t_n + t] = y[((s * 2 + c) * MODEL_BINS + fm) * WIN + w];
+                masks[k][c]
+                    .par_chunks_mut(t_n)
+                    .enumerate()
+                    .for_each(|(f, row)| {
+                        let fm = f.min(MODEL_BINS - 1); // Nyquist bin borrows the bin below
+                        for (t, m) in row[start..end].iter_mut().enumerate() {
+                            *m = mask_at(&y.data, plane, s, c, fm * WIN + CTX + t);
                         }
-                    }
-                }
+                    });
             }
         }
         start += CORE;
