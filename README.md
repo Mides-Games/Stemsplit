@@ -18,9 +18,10 @@ Decode (Symphonia) → stereo 44.1 kHz → STFT (2048 / 512, Hann) → one soft 
 per stem and channel → iSTFT. Masks sum to one, so the stems always add back to
 the mix. Two mask sources:
 
-- **`unet`** — our spectrogram U-Net (`crates/stemsplit/src/model.rs`, inference
-  with `candle`), weights trained by `train/train.py`, loaded from
-  `models/stemsplit.safetensors`. Written from scratch; no Demucs code or weights.
+- **`unet`** — our spectrogram U-Net (`crates/stemsplit/src/model.rs`; weights
+  load through `candle`, the convolutions run in `crates/stemsplit/src/conv.rs`),
+  trained by `train/train.py`, loaded from `models/stemsplit.safetensors`.
+  Written from scratch; no Demucs code or weights.
 - **`hpss`** — harmonic/percussive median filtering (no weights). The fallback
   when no model file exists; gives drums, bass (harmonic < 200 Hz) and other, no vocals.
 
@@ -31,6 +32,7 @@ let sep = stemsplit::Separator::load(Path::new("models/stemsplit.safetensors"))
     .unwrap_or(stemsplit::Separator::Hpss);
 let drums: Vec<f32> = stemsplit::drums_mono(&sep, &interleaved, channels, rate)?;
 let stems = sep.separate(&stemsplit::decode(path)?)?;   // Stems { drums, bass, vocals, other }
+let only = sep.separate_stems(&mix, &[0])?;              // drums alone: the other masks are skipped
 ```
 
 ## Training
@@ -49,7 +51,7 @@ stemsplit eval --data data/test --model models/stemsplit.safetensors
 
 ## Licences
 
-Our code: MIT OR Apache-2.0. Dependencies: candle, rustfft, hound, clap, anyhow
+Our code: MIT OR Apache-2.0. Dependencies: candle, rayon, rustfft, hound, clap, anyhow
 (MIT/Apache); Symphonia (MPL-2.0, file-level copyleft, commercial use allowed,
 unmodified). Training: PyTorch, NumPy, SciPy, safetensors (BSD/Apache). No
 non-commercial or AGPL parts, data or weights.

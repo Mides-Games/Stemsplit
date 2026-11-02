@@ -69,6 +69,11 @@ pub fn stft(x: &[f32]) -> Spec {
 }
 
 pub fn istft(spec: &Spec, len: usize) -> Vec<f32> {
+    istft_masked(spec, None, len)
+}
+
+/// iSTFT of `spec` times `mask` (`[bin * frames + frame]`), without building the masked spectrogram.
+pub fn istft_masked(spec: &Spec, mask: Option<&[f32]>, len: usize) -> Vec<f32> {
     let win = window();
     let ifft = FftPlanner::<f32>::new().plan_fft_inverse(N_FFT);
     let total = N_FFT + HOP * (spec.frames - 1);
@@ -77,7 +82,11 @@ pub fn istft(spec: &Spec, len: usize) -> Vec<f32> {
     let mut buf = vec![Complex32::new(0.0, 0.0); N_FFT];
     for t in 0..spec.frames {
         for f in 0..BINS {
-            buf[f] = spec.at(f, t);
+            let i = f * spec.frames + t;
+            buf[f] = match mask {
+                Some(m) => spec.data[i] * m[i],
+                None => spec.data[i],
+            };
         }
         for f in 1..N_FFT / 2 {
             buf[N_FFT - f] = buf[f].conj();
